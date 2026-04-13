@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LA 2028 Olympics Schedule Builder</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <!-- Tab bar -->
+  <div class="tab-bar">
+    <button class="tab active" data-tab="browse">Browse Events</button>
+    <button class="tab" data-tab="schedule">My Schedule</button>
+    <button class="tab" data-tab="tiers">Sport Tiers</button>
+    <button class="tab" data-tab="shopping">Shopping List</button>
+    <button class="tab" data-tab="map">Venue Map</button>
+  </div>
+
+  <!-- ═══════════ BROWSE TAB ═══════════ -->
+  <div class="tab-content active" id="tab-browse">
+    <div class="filter-row">
+      <div class="filter-group">
+        <label>Sport</label>
+        <div class="multi-select" id="sport-filter">
+          <button class="ms-btn">All Sports</button>
+          <div class="ms-popup hidden"></div>
+        </div>
+      </div>
+      <div class="filter-group">
+        <label>Zone</label>
+        <select id="zone-filter"><option>LA Area Only</option></select>
+      </div>
+      <div class="filter-group">
+        <label>Type</label>
+        <select id="type-filter"><option>All</option></select>
+      </div>
+      <div class="filter-group">
+        <label>Date</label>
+        <div class="multi-select" id="date-filter">
+          <button class="ms-btn">All Dates</button>
+          <div class="ms-popup hidden"></div>
+        </div>
+      </div>
+      <div class="filter-group">
+        <label>Medal</label>
+        <select id="medal-filter">
+          <option>All</option>
+          <option>Medal Events</option>
+          <option>Non-Medal Events</option>
+        </select>
+      </div>
+    </div>
+    <div class="filter-row">
+      <div class="filter-group">
+        <label>Search</label>
+        <input type="text" id="search-filter" placeholder="sport, venue, description...">
+      </div>
+      <div class="filter-group">
+        <label>Max price $</label>
+        <input type="number" id="price-filter" placeholder="any" style="width:80px">
+      </div>
+      <div class="filter-group" style="align-items:center">
+        <label class="cb-label"><input type="checkbox" id="selected-only"> Show selected only</label>
+      </div>
+      <div class="filter-group" style="margin-left:auto">
+        <span id="event-count" class="event-count">0 events</span>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table id="events-table">
+        <thead>
+          <tr>
+            <th data-col="selected" style="width:35px">✓</th>
+            <th data-col="sport" style="width:140px">Sport</th>
+            <th data-col="venue" style="width:170px">Venue</th>
+            <th data-col="zone" style="width:100px">Zone</th>
+            <th data-col="date" style="width:100px">Date</th>
+            <th data-col="time" style="width:130px">Time</th>
+            <th data-col="type" style="width:90px">Type</th>
+            <th data-col="description">Description</th>
+            <th data-col="cheapest" style="width:80px;text-align:right">Cheapest</th>
+            <th data-col="session_code" style="width:75px">Code</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="browse-footer">
+      <span class="info-text">Select one or more events, then click Add. Ctrl+Click / Shift+Click for multi-select.</span>
+      <div class="browse-btns">
+        <button class="btn btn-blue" id="btn-add-selected">Add Selected to Schedule...</button>
+        <button class="btn btn-save" id="btn-save-profile">Save Profile...</button>
+        <button class="btn btn-purple" id="btn-load-profile">Load Profile...</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ SCHEDULE TAB ═══════════ -->
+  <div class="tab-content" id="tab-schedule">
+    <div class="schedule-top">
+      <label>Budget: $<input type="number" id="budget-input" value="5000" style="width:100px"></label>
+      <button class="btn btn-blue" id="btn-refresh-schedule">Refresh</button>
+      <span id="budget-label" class="budget-label"></span>
+    </div>
+    <div id="schedule-scroll" class="scroll-area"></div>
+  </div>
+
+  <!-- ═══════════ SPORT TIERS TAB ═══════════ -->
+  <div class="tab-content" id="tab-tiers">
+    <div class="tiers-top">
+      <div>
+        <h2>Rank Your Sports by Priority</h2>
+        <p class="subtitle">(Tier 1 = highest priority. Sports on the same tier have equal priority.)</p>
+      </div>
+      <button class="btn btn-blue" id="btn-save-tiers">Save &amp; Recalculate</button>
+    </div>
+    <div id="tiers-scroll" class="scroll-area"></div>
+  </div>
+
+  <!-- ═══════════ SHOPPING LIST TAB ═══════════ -->
+  <div class="tab-content" id="tab-shopping">
+    <div class="shopping-top">
+      <h2>Optimized Event Plan</h2>
+      <div class="shopping-top-btns">
+        <button class="btn btn-blue" id="btn-recalculate">Recalculate</button>
+        <button class="btn btn-blue" id="btn-export-csv">Export to CSV</button>
+      </div>
+    </div>
+    <div class="settings-row">
+      <label>Max events:
+        <select id="opt-max-events">
+          <option>3</option><option>4</option><option>5</option>
+          <option selected>6</option><option>7</option><option>8</option><option>9</option><option>10</option>
+        </select>
+      </label>
+      <label>Tickets each:
+        <select id="opt-tickets">
+          <option>1</option><option selected>2</option><option>3</option><option>4</option>
+        </select>
+      </label>
+      <label>Gap (hrs):
+        <select id="opt-gap">
+          <option>0</option><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option>
+        </select>
+      </label>
+      <label class="cb-label"><input type="checkbox" id="opt-one-sport" checked> One sport only</label>
+      <label class="cb-label"><input type="checkbox" id="opt-consecutive" checked> Back-to-back days</label>
+    </div>
+    <div id="shopping-scroll" class="scroll-area"></div>
+  </div>
+
+  <!-- ═══════════ MAP TAB ═══════════ -->
+  <div class="tab-content" id="tab-map">
+    <div class="map-top">
+      <h2>LA 2028 Venue Map</h2>
+      <label class="cb-label"><input type="checkbox" id="map-selected-only"> Show only my selected venues</label>
+    </div>
+    <div id="map-container"></div>
+  </div>
+</div>
+
+<!-- ═══════════ MODALS ═══════════ -->
+<div class="modal-overlay hidden" id="modal-overlay">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

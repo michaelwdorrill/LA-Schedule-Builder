@@ -11,6 +11,7 @@ import sys
 from data_loader import (
     load_events, load_selections, save_selections,
     load_tiers, save_tiers, load_excluded, save_excluded,
+    load_locked, save_locked,
     save_profile, load_profile, list_profiles, delete_profile,
     get_unique_sports, get_unique_zones, get_unique_dates,
     get_unique_session_types, get_unique_venues,
@@ -199,6 +200,7 @@ class App(ctk.CTk):
         self.load_saved_selections()
         self.sport_tiers = load_tiers()
         self.excluded_events = load_excluded()
+        self.locked_events = load_locked()
         self.la_only = tk.BooleanVar(value=True)
         self.filtered_events = []
         self.optimized_plan = []
@@ -719,7 +721,7 @@ class App(ctk.CTk):
             if not safe:
                 messagebox.showwarning("Invalid Name", "Name must contain alphanumeric characters.")
                 return
-            save_profile(safe, self.selections, self.sport_tiers, self.excluded_events)
+            save_profile(safe, self.selections, self.sport_tiers, self.excluded_events, self.locked_events)
             dialog.destroy()
             messagebox.showinfo("Saved", f"Profile '{safe}' saved.")
 
@@ -765,9 +767,11 @@ class App(ctk.CTk):
                     self.selections = data["selections"]
                     self.sport_tiers = data["tiers"]
                     self.excluded_events = data["excluded"]
+                    self.locked_events = data.get("locked", set())
                     save_selections(self.selections)
                     save_tiers(self.sport_tiers)
                     save_excluded(self.excluded_events)
+                    save_locked(self.locked_events)
                     dialog.destroy()
                     self.apply_filters()
                     self.refresh_schedule()
@@ -1025,27 +1029,100 @@ class App(ctk.CTk):
         top = ctk.CTkFrame(self.tab_shopping)
         top.pack(fill="x", padx=6, pady=6)
 
-        ctk.CTkLabel(top, text="Optimized 6-Event Plan", font=("Segoe UI", 16, "bold")).pack(side="left", padx=8)
+        ctk.CTkLabel(top, text="Optimized Event Plan", font=("Segoe UI", 16, "bold")).pack(side="left", padx=8)
         ctk.CTkButton(top, text="Export to CSV", command=self.export_csv, width=140).pack(side="right", padx=8)
         ctk.CTkButton(top, text="Recalculate", command=self.refresh_shopping, width=120).pack(side="right", padx=4)
 
-        info = ctk.CTkFrame(self.tab_shopping, fg_color="transparent")
-        info.pack(fill="x", padx=6)
-        ctk.CTkLabel(info, text="12 tickets (2 per event)  |  One sport per event  |  3hr gap between events  |  Higher tiers first  |  Days compressed",
-                     font=("Segoe UI", 11), text_color="#888").pack(anchor="w", padx=8)
+        # ── Optimizer settings row ──
+        settings = ctk.CTkFrame(self.tab_shopping, fg_color="#1a1a2e", corner_radius=6)
+        settings.pack(fill="x", padx=6, pady=(2, 4))
+
+        # Max events
+        ctk.CTkLabel(settings, text="Max events:", font=("Segoe UI", 11)).pack(side="left", padx=(8, 2))
+        self.opt_max_events = tk.IntVar(value=6)
+        ctk.CTkOptionMenu(settings, variable=self.opt_max_events,
+                          values=["3", "4", "5", "6", "7", "8", "9", "10"],
+                          width=60, height=26, font=("Segoe UI", 11),
+                          command=lambda _: self.refresh_shopping()).pack(side="left", padx=(0, 10))
+
+        # Tickets per event
+        ctk.CTkLabel(settings, text="Tickets each:", font=("Segoe UI", 11)).pack(side="left", padx=(0, 2))
+        self.opt_tickets_per = tk.IntVar(value=2)
+        ctk.CTkOptionMenu(settings, variable=self.opt_tickets_per,
+                          values=["1", "2", "3", "4"],
+                          width=55, height=26, font=("Segoe UI", 11),
+                          command=lambda _: self.refresh_shopping()).pack(side="left", padx=(0, 10))
+
+        # Gap hours
+        ctk.CTkLabel(settings, text="Gap (hrs):", font=("Segoe UI", 11)).pack(side="left", padx=(0, 2))
+        self.opt_gap_hours = tk.IntVar(value=3)
+        ctk.CTkOptionMenu(settings, variable=self.opt_gap_hours,
+                          values=["0", "1", "2", "3", "4", "5"],
+                          width=55, height=26, font=("Segoe UI", 11),
+                          command=lambda _: self.refresh_shopping()).pack(side="left", padx=(0, 10))
+
+        # One sport per event toggle
+        self.opt_one_sport = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(settings, text="One sport only", variable=self.opt_one_sport,
+                        font=("Segoe UI", 11), height=26,
+                        command=self.refresh_shopping).pack(side="left", padx=(0, 10))
+
+        # Back-to-back days toggle
+        self.opt_consecutive = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(settings, text="Back-to-back days", variable=self.opt_consecutive,
+                        font=("Segoe UI", 11), height=26,
+                        command=self.refresh_shopping).pack(side="left", padx=(0, 10))
 
         self.shopping_scroll = ctk.CTkScrollableFrame(self.tab_shopping)
         self.shopping_scroll.pack(fill="both", expand=True, padx=6, pady=6)
 
         self.refresh_shopping()
 
+    def _get_gap_minutes(self):
+        """Get the gap requirement in minutes from the UI setting."""
+        try:
+            return self.opt_gap_hours.get() * 60
+        except (AttributeError, tk.TclError):
+            return 180  # default 3hr
+
+    def _check_gap(self, e1, e2):
+        """Check that the configured gap exists between two events on the same day."""
+        if e1["date"] != e2["date"]:
+            return True
+        gap_min = self._get_gap_minutes()
+        if gap_min == 0:
+            return True
+        end1 = time_to_minutes(e1["end_time"])
+        start1 = time_to_minutes(e1["start_time"])
+        end2 = time_to_minutes(e2["end_time"])
+        start2 = time_to_minutes(e2["start_time"])
+        if any(v is None for v in (end1, start1, end2, start2)):
+            return True
+        if start1 < start2:
+            return (start2 - end1) >= gap_min
+        else:
+            return (start1 - end2) >= gap_min
+
     def build_optimized_plan(self):
         """
-        Build the best 6-event plan. Two-phase approach:
-        Phase 1: Pick the best candidate per sport (tier-priority sorted).
-        Phase 2: From those, greedily select 6 that fit, preferring same-day
-                 packing (day compression) while respecting the 3hr gap rule.
+        Build an optimized event plan. Respects locked events, then greedily fills
+        remaining slots preferring consecutive calendar days (minimise hotel nights)
+        while respecting the gap rule and one-sport constraint (both configurable).
         """
+        # Read settings
+        try:
+            max_events = self.opt_max_events.get()
+        except (AttributeError, tk.TclError):
+            max_events = 6
+        try:
+            one_sport_only = self.opt_one_sport.get()
+        except (AttributeError, tk.TclError):
+            one_sport_only = True
+        try:
+            use_consecutive = self.opt_consecutive.get()
+        except (AttributeError, tk.TclError):
+            use_consecutive = True
+
         prio_order = {"must": 0, "want": 1, "maybe": 2}
 
         # Build candidate list
@@ -1072,50 +1149,61 @@ class App(ctk.CTk):
         # Sort by tier priority
         candidates.sort(key=lambda c: c["sort_key"])
 
-        # Phase 1: For each sport, pick the best candidate (already sorted, so first wins)
+        # ── Phase 0: Seed with locked events ──────────────────────────────
+        plan = []
+        used_sports = set()
+        plan_days = set()
+
+        for cand in candidates:
+            if cand["code"] in self.locked_events:
+                plan.append(cand)
+                if one_sport_only:
+                    used_sports.add(cand["event"]["sport"])
+                plan_days.add(cand["event"]["date"])
+
+        # ── Helper: distance from nearest plan day ──
+        def day_proximity(d):
+            if not plan_days:
+                return 0
+            return min(abs((d - pd).days) for pd in plan_days)
+
+        # ── Phase 1: For each sport, pick the best candidate ──────────────
         best_per_sport = {}
         for cand in candidates:
             sport = cand["event"]["sport"]
             if sport not in best_per_sport:
                 best_per_sport[sport] = cand
 
-        # Sort sports by tier to establish pick order
         sport_order = sorted(best_per_sport.keys(), key=lambda s: best_per_sport[s]["sort_key"])
 
-        # Phase 2: Greedy selection with day compression
-        # We try to pack events onto days that already have picks, as long as 3hr gap holds.
-        # Strategy: Process sports in tier order. For each sport, find all non-excluded
-        # candidates for that sport. Prefer candidates on days already used by the plan.
-        plan = []
-        used_sports = set()
-        plan_days = set()  # dates already in the plan
-
+        # ── Phase 2: Greedy selection ─────────────────────────────────────
         for sport in sport_order:
-            if len(plan) >= 6:
+            if len(plan) >= max_events:
                 break
-            if sport in used_sports:
+            if one_sport_only and sport in used_sports:
                 continue
 
-            # Get all candidates for this sport, sorted: prefer days already in plan, then by sort_key
             sport_cands = [c for c in candidates if c["event"]["sport"] == sport]
 
-            # Score: bonus for being on an existing plan day
-            def day_score(c):
-                on_existing_day = 0 if c["event"]["date"] in plan_days else 1
-                return (on_existing_day, c["sort_key"])
-
-            sport_cands.sort(key=day_score)
+            if use_consecutive:
+                def day_score(c, _plan_days=set(plan_days)):
+                    prox = day_proximity(c["event"]["date"]) if _plan_days else 0
+                    return (prox, c["sort_key"])
+                sport_cands.sort(key=day_score)
+            else:
+                sport_cands.sort(key=lambda c: c["sort_key"])
 
             for cand in sport_cands:
-                # Check 3hr gap with all picked events
+                # Check gap with all picked events
                 ok = True
                 for picked in plan:
-                    if not has_3hr_gap(cand["event"], picked["event"]):
+                    if not self._check_gap(cand["event"], picked["event"]):
                         ok = False
                         break
                 if ok:
                     plan.append(cand)
-                    used_sports.add(sport)
+                    if one_sport_only:
+                        used_sports.add(sport)
                     plan_days.add(cand["event"]["date"])
                     break
 
@@ -1145,17 +1233,30 @@ class App(ctk.CTk):
             return
 
         # Summary
-        total = sum(c["selection"]["price"] * 2 for c in self.optimized_plan)
+        try:
+            tix = self.opt_tickets_per.get()
+        except (AttributeError, tk.TclError):
+            tix = 2
+        total = sum(c["selection"]["price"] * tix for c in self.optimized_plan)
         unique_days = len(set(c["event"]["date"] for c in self.optimized_plan))
 
         summary = ctk.CTkFrame(self.shopping_scroll, fg_color="#1a1a2e", corner_radius=8)
         summary.pack(fill="x", padx=4, pady=4)
         ctk.CTkLabel(summary, text="Your Plan", font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
-        ctk.CTkLabel(summary, text=f"{len(self.optimized_plan)} events  |  {len(self.optimized_plan) * 2} tickets  |  {unique_days} day(s)  |  Total: ${total:,.2f}",
+        ctk.CTkLabel(summary, text=f"{len(self.optimized_plan)} events  |  {len(self.optimized_plan) * tix} tickets ({tix}/event)  |  {unique_days} day(s)  |  Total: ${total:,.2f}",
                      font=("Segoe UI", 14), text_color="#4ade80").pack(anchor="w", padx=20, pady=(0, 4))
+        status_parts = []
+        locked_in_plan = sum(1 for c in self.optimized_plan if c["code"] in self.locked_events)
+        if locked_in_plan:
+            status_parts.append(f"{locked_in_plan} locked in")
         if self.excluded_events:
-            ctk.CTkLabel(summary, text=f"{len(self.excluded_events)} event(s) marked unavailable",
-                         font=("Segoe UI", 11), text_color="#f87171").pack(anchor="w", padx=20, pady=(0, 6))
+            status_parts.append(f"{len(self.excluded_events)} event(s) marked unavailable")
+        if status_parts:
+            colors = {"locked": "#60a5fa", "unavailable": "#f87171"}
+            for part in status_parts:
+                color = "#60a5fa" if "locked" in part else "#f87171"
+                ctk.CTkLabel(summary, text=part, font=("Segoe UI", 11), text_color=color).pack(anchor="w", padx=20, pady=(0, 1))
+            ctk.CTkLabel(summary, text="", font=("Segoe UI", 2)).pack()
         else:
             ctk.CTkLabel(summary, text="", font=("Segoe UI", 2)).pack()
 
@@ -1164,9 +1265,11 @@ class App(ctk.CTk):
         for idx, cand in enumerate(self.optimized_plan, 1):
             ev = cand["event"]
             sel = cand["selection"]
-            ticket_cost = sel["price"] * 2
+            code = cand["code"]
+            ticket_cost = sel["price"] * tix
             running += ticket_cost
             tier = cand["tier"]
+            is_locked = code in self.locked_events
 
             brightness = max(0.3, 1.0 - (tier - 1) * 0.12)
             r = int(74 * brightness)
@@ -1176,7 +1279,10 @@ class App(ctk.CTk):
 
             medal_str = " (Medal)" if cand["is_medal"] == 0 else ""
 
-            row = ctk.CTkFrame(self.shopping_scroll, fg_color="#1a2a1a" if idx % 2 == 1 else "#1a1a2e", corner_radius=6)
+            bg = "#1a2a1a" if idx % 2 == 1 else "#1a1a2e"
+            if is_locked:
+                bg = "#1a2a2a"  # slightly different tint for locked
+            row = ctk.CTkFrame(self.shopping_scroll, fg_color=bg, corner_radius=6)
             row.pack(fill="x", padx=4, pady=3)
 
             top_line = ctk.CTkFrame(row, fg_color="transparent")
@@ -1186,7 +1292,11 @@ class App(ctk.CTk):
             ctk.CTkLabel(top_line, text=f"Tier {tier}", font=("Segoe UI", 12, "bold"),
                          text_color=tier_color, width=55).pack(side="left", padx=4)
             ctk.CTkLabel(top_line, text=f"{ev['sport']}{medal_str}", font=("Segoe UI", 14, "bold")).pack(side="left", padx=4)
-            ctk.CTkLabel(top_line, text=f"{sel['category']}: ${sel['price']:,.2f} x2 = ${ticket_cost:,.2f}",
+            ctk.CTkLabel(top_line, text=f"[{code}]", font=("Segoe UI", 12), text_color="#8888cc").pack(side="left", padx=(6, 0))
+            desc = ev.get("description", "")
+            if desc:
+                ctk.CTkLabel(top_line, text=f"— {desc}", font=("Segoe UI", 11), text_color="#999").pack(side="left", padx=(8, 0))
+            ctk.CTkLabel(top_line, text=f"{sel['category']}: ${sel['price']:,.2f} x{tix} = ${ticket_cost:,.2f}",
                          font=("Segoe UI", 13, "bold")).pack(side="right", padx=4)
 
             bot_line = ctk.CTkFrame(row, fg_color="transparent")
@@ -1196,46 +1306,311 @@ class App(ctk.CTk):
                          font=("Segoe UI", 11), text_color="#aaa").pack(side="left")
             ctk.CTkLabel(bot_line, text=f"Running: ${running:,.2f}", font=("Segoe UI", 11), text_color="#888").pack(side="right", padx=4)
 
-            def make_exclude(c=cand["code"]):
+            # ── Lock / Unlock button ──
+            def make_toggle_lock(c=code, locked=is_locked):
+                def toggle():
+                    if locked:
+                        self.locked_events.discard(c)
+                    else:
+                        self.locked_events.add(c)
+                    save_locked(self.locked_events)
+                    self.refresh_shopping()
+                return toggle
+
+            if is_locked:
+                ctk.CTkButton(bot_line, text="Locked In", width=100, height=26,
+                              fg_color="#15803d", hover_color="#166534", font=("Segoe UI", 11, "bold"),
+                              command=make_toggle_lock()).pack(side="right", padx=(0, 4))
+            else:
+                ctk.CTkButton(bot_line, text="Lock In", width=100, height=26,
+                              fg_color="#1e40af", hover_color="#1e3a8a", font=("Segoe UI", 11),
+                              command=make_toggle_lock()).pack(side="right", padx=(0, 4))
+
+            # ── Exclude this specific event ──
+            def make_exclude(c=code):
                 def exclude():
+                    self.locked_events.discard(c)
                     self.excluded_events.add(c)
+                    save_locked(self.locked_events)
                     save_excluded(self.excluded_events)
                     self.refresh_shopping()
                 return exclude
 
             ctk.CTkButton(bot_line, text="Unavailable / Too Expensive", width=210, height=26,
                           fg_color="#7f1d1d", hover_color="#991b1b", font=("Segoe UI", 11),
-                          command=make_exclude()).pack(side="right", padx=(0, 12))
+                          command=make_exclude()).pack(side="right", padx=(0, 4))
+
+            # ── Drop Sport button ──
+            def make_drop_sport(sport=ev["sport"]):
+                def drop():
+                    for c2 in self.selections:
+                        ev2 = self.get_event_by_code(c2)
+                        if ev2 and ev2["sport"] == sport:
+                            self.locked_events.discard(c2)
+                            self.excluded_events.add(c2)
+                    save_locked(self.locked_events)
+                    save_excluded(self.excluded_events)
+                    self.refresh_shopping()
+                return drop
+
+            ctk.CTkButton(bot_line, text="Drop Sport", width=90, height=26,
+                          fg_color="#6b2121", hover_color="#7f1d1d", font=("Segoe UI", 10),
+                          command=make_drop_sport()).pack(side="right", padx=(0, 4))
+
+            # ── Drop Medal Events button (show if this sport has any medal sessions selected) ──
+            sport_has_medals = any(
+                self.get_event_by_code(c2) and self.get_event_by_code(c2)["sport"] == ev["sport"]
+                and self.get_event_by_code(c2)["session_type"] in MEDAL_SESSION_TYPES
+                for c2 in self.selections if c2 not in self.excluded_events
+            )
+            if sport_has_medals:
+                def make_drop_medals(sport=ev["sport"]):
+                    def drop():
+                        for c2 in list(self.selections.keys()):
+                            ev2 = self.get_event_by_code(c2)
+                            if ev2 and ev2["sport"] == sport and ev2["session_type"] in MEDAL_SESSION_TYPES:
+                                self.locked_events.discard(c2)
+                                self.excluded_events.add(c2)
+                        save_locked(self.locked_events)
+                        save_excluded(self.excluded_events)
+                        self.refresh_shopping()
+                    return drop
+
+                ctk.CTkButton(bot_line, text="Drop Medals", width=100, height=26,
+                              fg_color="#6b2121", hover_color="#7f1d1d", font=("Segoe UI", 10),
+                              command=make_drop_medals()).pack(side="right", padx=(0, 4))
+
+        # ── Calendar View (Outlook work-week style) ──────────────────────
+        self._render_calendar_view()
 
         # Excluded events section
         if self.excluded_events:
             ctk.CTkLabel(self.shopping_scroll, text="", font=("Segoe UI", 6)).pack()
             excl_frame = ctk.CTkFrame(self.shopping_scroll, fg_color="#2a1a1a", corner_radius=8)
             excl_frame.pack(fill="x", padx=4, pady=4)
-            ctk.CTkLabel(excl_frame, text="Excluded Events (marked unavailable/too expensive):",
-                         font=("Segoe UI", 13, "bold"), text_color="#f87171").pack(anchor="w", padx=10, pady=(6, 2))
 
+            excl_header = ctk.CTkFrame(excl_frame, fg_color="transparent")
+            excl_header.pack(fill="x", padx=10, pady=(6, 2))
+            ctk.CTkLabel(excl_header, text="Excluded Events (marked unavailable/too expensive):",
+                         font=("Segoe UI", 13, "bold"), text_color="#f87171").pack(side="left")
+
+            # Group excluded by sport for restore-sport button
+            excl_by_sport = {}
             for code in sorted(self.excluded_events):
                 ev = self.get_event_by_code(code)
                 if not ev:
                     continue
-                erow = ctk.CTkFrame(excl_frame, fg_color="#3a1a1a", corner_radius=4)
-                erow.pack(fill="x", padx=12, pady=1)
-                ctk.CTkLabel(erow, text=f"{ev['sport']} ({code}) - {format_date(ev['date'])} {format_time(ev['start_time'])}",
-                             font=("Segoe UI", 11), text_color="#f99").pack(side="left", padx=8, pady=3)
+                excl_by_sport.setdefault(ev["sport"], []).append((code, ev))
 
-                def make_restore(c=code):
+            for sport in sorted(excl_by_sport.keys()):
+                items = excl_by_sport[sport]
+
+                sport_header = ctk.CTkFrame(excl_frame, fg_color="#331a1a", corner_radius=4)
+                sport_header.pack(fill="x", padx=12, pady=(6, 1))
+                ctk.CTkLabel(sport_header, text=f"{sport} ({len(items)} excluded)",
+                             font=("Segoe UI", 12, "bold"), text_color="#f99").pack(side="left", padx=8, pady=3)
+
+                def make_restore_sport(s=sport, codes=[c for c, _ in items]):
                     def restore():
-                        self.excluded_events.discard(c)
+                        for c in codes:
+                            self.excluded_events.discard(c)
                         save_excluded(self.excluded_events)
                         self.refresh_shopping()
                     return restore
 
-                ctk.CTkButton(erow, text="Restore", width=70, height=24, fg_color="#444",
-                              hover_color="#555", font=("Segoe UI", 10),
-                              command=make_restore()).pack(side="right", padx=4, pady=3)
+                ctk.CTkButton(sport_header, text="Restore Sport", width=110, height=24,
+                              fg_color="#555", hover_color="#666", font=("Segoe UI", 10, "bold"),
+                              command=make_restore_sport()).pack(side="right", padx=4, pady=3)
+
+                for code, ev in items:
+                    erow = ctk.CTkFrame(excl_frame, fg_color="#3a1a1a", corner_radius=4)
+                    erow.pack(fill="x", padx=20, pady=1)
+                    ctk.CTkLabel(erow, text=f"({code}) - {format_date(ev['date'])} {format_time(ev['start_time'])}  {ev.get('description', '')}",
+                                 font=("Segoe UI", 11), text_color="#f99").pack(side="left", padx=8, pady=3)
+
+                    def make_restore(c=code):
+                        def restore():
+                            self.excluded_events.discard(c)
+                            save_excluded(self.excluded_events)
+                            self.refresh_shopping()
+                        return restore
+
+                    ctk.CTkButton(erow, text="Restore", width=70, height=24, fg_color="#444",
+                                  hover_color="#555", font=("Segoe UI", 10),
+                                  command=make_restore()).pack(side="right", padx=4, pady=3)
 
             ctk.CTkLabel(excl_frame, text="", font=("Segoe UI", 2)).pack()
+
+    def _render_calendar_view(self):
+        """Render an Outlook work-week style calendar of the optimized plan."""
+        if not self.optimized_plan:
+            return
+
+        from datetime import timedelta
+
+        # Collect plan dates and build contiguous range
+        plan_dates = sorted(set(c["event"]["date"] for c in self.optimized_plan))
+        if not plan_dates:
+            return
+
+        # Build contiguous date range from first to last plan date
+        first_date = plan_dates[0]
+        last_date = plan_dates[-1]
+        all_dates = []
+        d = first_date
+        while d <= last_date:
+            all_dates.append(d)
+            d += timedelta(days=1)
+
+        # Find time bounds (earliest start, latest end) with padding
+        starts = [time_to_minutes(c["event"]["start_time"]) for c in self.optimized_plan
+                  if c["event"]["start_time"] is not None]
+        ends = [time_to_minutes(c["event"]["end_time"]) for c in self.optimized_plan
+                if c["event"]["end_time"] is not None]
+        if not starts or not ends:
+            return
+
+        earliest = max(0, min(starts) - 30)       # 30min padding before
+        latest = min(1440, max(ends) + 30)         # 30min padding after
+        time_span = latest - earliest
+        if time_span <= 0:
+            return
+
+        # Layout constants
+        header_h = 32
+        time_gutter_w = 60
+        num_days = len(all_dates)
+        col_w = max(140, min(220, 900 // max(num_days, 1)))
+        canvas_w = time_gutter_w + col_w * num_days + 10
+        pixels_per_min = 0.75
+        canvas_h = int(header_h + time_span * pixels_per_min + 20)
+
+        # Spacer
+        ctk.CTkLabel(self.shopping_scroll, text="", font=("Segoe UI", 6)).pack()
+
+        cal_frame = ctk.CTkFrame(self.shopping_scroll, fg_color="#121820", corner_radius=8)
+        cal_frame.pack(fill="x", padx=4, pady=4)
+
+        ctk.CTkLabel(cal_frame, text="Your Schedule", font=("Segoe UI", 15, "bold")).pack(
+            anchor="w", padx=10, pady=(8, 2))
+
+        canvas = tk.Canvas(cal_frame, width=canvas_w, height=canvas_h,
+                           bg="#121820", highlightthickness=0)
+        canvas.pack(padx=8, pady=(0, 8))
+
+        # ── Column headers (dates) ──
+        for i, d in enumerate(all_dates):
+            x = time_gutter_w + i * col_w
+            has_event = d in set(c["event"]["date"] for c in self.optimized_plan)
+            label = d.strftime("%a\n%b %d")
+            color = "#e2e8f0" if has_event else "#555555"
+            canvas.create_text(x + col_w // 2, header_h // 2, text=label,
+                               fill=color, font=("Segoe UI", 9, "bold"), justify="center")
+
+        # ── Header separator ──
+        canvas.create_line(time_gutter_w, header_h, canvas_w, header_h, fill="#333")
+
+        # ── Time gutter + hour grid lines ──
+        # Round earliest down to hour
+        first_hour = (earliest // 60) * 60
+        h = first_hour
+        while h <= latest:
+            y = header_h + (h - earliest) * pixels_per_min
+            # Hour label
+            hour_12 = h // 60
+            am_pm = "AM" if hour_12 < 12 else "PM"
+            if hour_12 == 0:
+                hour_12 = 12
+            elif hour_12 > 12:
+                hour_12 -= 12
+            canvas.create_text(time_gutter_w - 6, y, text=f"{hour_12} {am_pm}",
+                               fill="#666", font=("Segoe UI", 8), anchor="e")
+            # Grid line
+            canvas.create_line(time_gutter_w, y, canvas_w, y, fill="#222")
+            h += 60
+
+        # ── Column separators ──
+        for i in range(num_days + 1):
+            x = time_gutter_w + i * col_w
+            canvas.create_line(x, header_h, x, canvas_h, fill="#222")
+
+        # ── Event colors by tier ──
+        tier_colors = {
+            1: ("#15803d", "#bbf7d0"),
+            2: ("#1d4ed8", "#bfdbfe"),
+            3: ("#9333ea", "#e9d5ff"),
+            4: ("#b45309", "#fde68a"),
+            5: ("#dc2626", "#fecaca"),
+        }
+
+        # ── Event blocks ──
+        date_to_col = {d: i for i, d in enumerate(all_dates)}
+        for cand in self.optimized_plan:
+            ev = cand["event"]
+            col_idx = date_to_col.get(ev["date"])
+            if col_idx is None:
+                continue
+
+            start_m = time_to_minutes(ev["start_time"])
+            end_m = time_to_minutes(ev["end_time"])
+            if start_m is None or end_m is None:
+                continue
+
+            x1 = time_gutter_w + col_idx * col_w + 3
+            x2 = x1 + col_w - 6
+            y1 = header_h + (start_m - earliest) * pixels_per_min
+            y2 = header_h + (end_m - earliest) * pixels_per_min
+
+            # Enforce minimum block height so short events stay readable
+            min_block = 38
+            if (y2 - y1) < min_block:
+                y2 = y1 + min_block
+
+            tier = cand["tier"]
+            bg_color, text_color = tier_colors.get(tier, ("#444", "#fff"))
+            is_locked = cand["code"] in self.locked_events
+
+            # Event rectangle
+            canvas.create_rectangle(x1, y1, x2, y2, fill=bg_color, outline="#000", width=1)
+
+            # Locked indicator - border highlight
+            if is_locked:
+                canvas.create_rectangle(x1, y1, x2, y2, fill="", outline="#fbbf24", width=2)
+
+            # Text inside block
+            block_h = y2 - y1
+            medal_str = " *" if cand["is_medal"] == 0 else ""
+            sport_text = f"{ev['sport']}{medal_str}"
+            code_text = cand["code"]
+            time_text = f"{format_time(ev['start_time'])} - {format_time(ev['end_time'])}"
+            desc_text = ev.get("description", "")
+            lock_tag = " LOCKED" if is_locked else ""
+
+            # Use anchor="nw" so text flows downward and never overlaps upward
+            tx = x1 + 4
+            tw = col_w - 12
+            if block_h >= 50:
+                canvas.create_text(tx, y1 + 3, text=sport_text, anchor="nw",
+                                   fill=text_color, font=("Segoe UI", 8, "bold"), width=tw)
+                canvas.create_text(tx, y1 + 16, text=f"[{code_text}] {time_text}", anchor="nw",
+                                   fill=text_color, font=("Segoe UI", 7), width=tw)
+                if desc_text:
+                    canvas.create_text(tx, y1 + 28, text=desc_text, anchor="nw",
+                                       fill=text_color, font=("Segoe UI", 7), width=tw)
+                if is_locked:
+                    canvas.create_text(tx, y2 - 12, text="LOCKED", anchor="nw",
+                                       fill="#fbbf24", font=("Segoe UI", 7, "bold"))
+            elif block_h >= 38:
+                canvas.create_text(tx, y1 + 3, text=f"{sport_text}  [{code_text}]{lock_tag}", anchor="nw",
+                                   fill=text_color, font=("Segoe UI", 7, "bold"), width=tw)
+                canvas.create_text(tx, y1 + 15, text=time_text, anchor="nw",
+                                   fill=text_color, font=("Segoe UI", 7), width=tw)
+                if desc_text:
+                    canvas.create_text(tx, y1 + 26, text=desc_text, anchor="nw",
+                                       fill=text_color, font=("Segoe UI", 7), width=tw)
+            else:
+                canvas.create_text(tx, y1 + 2, text=f"{sport_text} [{code_text}]", anchor="nw",
+                                   fill=text_color, font=("Segoe UI", 7, "bold"), width=tw)
 
     def export_csv(self):
         if not self.optimized_plan:
@@ -1249,9 +1624,13 @@ class App(ctk.CTk):
 
         with open(filepath, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
+            try:
+                tix = self.opt_tickets_per.get()
+            except (AttributeError, tk.TclError):
+                tix = 2
             writer.writerow(["Order", "Tier", "Sport", "Session Code", "Venue", "Zone",
                              "Date", "Start Time", "End Time", "Description", "Type",
-                             "Category", "Price Each", "Price x2"])
+                             "Category", "Price Each", f"Price x{tix}"])
             for idx, cand in enumerate(self.optimized_plan, 1):
                 ev = cand["event"]
                 sel = cand["selection"]
@@ -1261,7 +1640,7 @@ class App(ctk.CTk):
                     ev["date"].strftime("%Y-%m-%d") if ev["date"] else "TBD",
                     format_time(ev["start_time"]), format_time(ev["end_time"]),
                     ev["description"], ev["session_type"],
-                    sel["category"], f"{sel['price']:.2f}", f"{sel['price'] * 2:.2f}",
+                    sel["category"], f"{sel['price']:.2f}", f"{sel['price'] * tix:.2f}",
                 ])
 
         messagebox.showinfo("Exported", f"Shopping list saved to:\n{filepath}")

@@ -62,6 +62,7 @@ VENUE_COORDS = {
 SAVE_FILE = "my_selections.json"
 TIERS_FILE = "my_tiers.json"
 EXCLUDED_FILE = "my_excluded.json"
+LOCKED_FILE = "my_locked.json"
 SAVES_DIR = "saved_profiles"
 
 
@@ -217,18 +218,33 @@ def load_excluded(filename=EXCLUDED_FILE):
         return set(json.load(f))
 
 
+def save_locked(locked, filename=LOCKED_FILE):
+    filepath = os.path.join(get_base_dir(), filename)
+    with open(filepath, "w") as f:
+        json.dump(list(locked), f, indent=2)
+
+
+def load_locked(filename=LOCKED_FILE):
+    filepath = os.path.join(get_base_dir(), filename)
+    if not os.path.exists(filepath):
+        return set()
+    with open(filepath, "r") as f:
+        return set(json.load(f))
+
+
 def get_saves_dir():
     d = os.path.join(get_base_dir(), SAVES_DIR)
     os.makedirs(d, exist_ok=True)
     return d
 
 
-def save_profile(name, selections, tiers, excluded):
+def save_profile(name, selections, tiers, excluded, locked=None):
     d = get_saves_dir()
     data = {
         "selections": selections,
         "tiers": tiers,
         "excluded": list(excluded),
+        "locked": list(locked) if locked else [],
     }
     with open(os.path.join(d, f"{name}.json"), "w") as f:
         json.dump(data, f, indent=2)
@@ -245,6 +261,7 @@ def load_profile(name):
         "selections": data.get("selections", {}),
         "tiers": data.get("tiers", {}),
         "excluded": set(data.get("excluded", [])),
+        "locked": set(data.get("locked", [])),
     }
 
 
