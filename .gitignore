@@ -1,0 +1,8 @@
+build/
+dist/
+__pycache__/
+*.pyc
+my_selections.json
+my_tiers.json
+my_excluded.json
+saved_profiles/
